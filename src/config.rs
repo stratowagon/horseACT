@@ -62,7 +62,7 @@ fn default_save_career_races() -> bool {
 }
 
 fn default_save_tt_races() -> bool {
-    true
+    false
 }
 
 #[derive(Deserialize, Serialize, Clone)]

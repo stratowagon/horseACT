@@ -22,6 +22,8 @@ jobs:
 
       - name: Build Release
         run: cargo build --release
+        env:
+          HORSEACT_HMAC_KEY: ${{ secrets.HORSEACT_HMAC_KEY }}
 
       - name: Create Release and Upload Asset
         uses: softprops/action-gh-release@v2
