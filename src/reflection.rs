@@ -7,18 +7,8 @@ use crate::il2cpp::*;
 use crate::config::is_field_blacklisted;
 use crate::log;
 
-const MAX_STATIC_DEPTH: usize = 10;
 const MAX_OBJECT_DEPTH: usize = 50;
 const MAX_ARRAY_LENGTH: u32 = 2000;
-
-// Touching these crashes the game on the current implementation
-const UNSTABLE_FIELDS: &[&str] = &[
-    "AUDIENCE_RATE_DIC",
-    "REGEX_COLOR_TAG",
-    "OVERRIDE_RECT_DICT",
-    "JUKEBOX_DIALOG_SET_LIST_ANIMATION_DATA",
-    "CARE_FLASH_MINI_CHARA_INFO_DUO",
-];
 
 pub struct MethodSearchResult {
     pub method: *mut RawMethodInfo,
@@ -227,168 +217,13 @@ unsafe fn resolve_enum_to_string(
     Value::Number(Number::from(current_val))
 }
 
-unsafe fn is_valid_pointer(ptr: usize) -> bool {
-    if ptr == 0 { return true; }
-    if ptr < 0x10000 { return false; }
-    if ptr % 8 != 0 { return false; }
-    true
-}
-
-pub unsafe fn dump_class_recursive(
-    klass: *mut RawIl2CppClass,
-    depth: usize
-) -> Value {
-    if klass.is_null() { return Value::Null; }
-    if depth > MAX_STATIC_DEPTH { return Value::String("<Max Static Depth>".to_string()); }
-
-    let name_ptr = FN_CLASS_GET_NAME.unwrap()(klass);
-    let name = CStr::from_ptr(name_ptr).to_string_lossy().to_string();
-
-    if name.contains("<") || name.contains("$") || name.contains("DisplayClass") { return Value::Null; }
-    if name.starts_with("System.") || name.starts_with("UnityEngine.") { return Value::Null; }
-    if FN_CLASS_IS_GENERIC.unwrap()(klass) || FN_CLASS_IS_INTERFACE.unwrap()(klass) {
-        return Value::String("<Skipped: Generic/Interface>".to_string());
-    }
-
-    FN_RUNTIME_CLASS_INIT.unwrap()(klass);
-
-    let mut map = Map::new();
-    let mut iter: *mut c_void = ptr::null_mut();
-    let mut visited_objects = HashSet::new();
-
-    loop {
-        let field = FN_CLASS_GET_FIELDS.unwrap()(klass, &mut iter);
-        if field.is_null() { break; }
-
-        let flags = FN_FIELD_GET_FLAGS.unwrap()(field);
-        if (flags & FIELD_ATTRIBUTE_STATIC) == 0 { continue; }
-        if (flags & FIELD_ATTRIBUTE_LITERAL) != 0 { continue; }
-
-        let offset = FN_FIELD_GET_OFFSET.unwrap()(field);
-        if offset == usize::MAX || offset == 0xFFFFFFFF { continue; }
-
-        let fname = CStr::from_ptr(FN_FIELD_GET_NAME.unwrap()(field))
-            .to_string_lossy()
-            .to_string();
-
-        if UNSTABLE_FIELDS.contains(&fname.as_str()) { continue; }
-
-        log!(".. Dumping Static Field: {}.{}", name, fname);
-
-        let ftype = FN_FIELD_GET_TYPE.unwrap()(field);
-        let type_enum = FN_TYPE_GET_TYPE.unwrap()(ftype);
-
-        let mut size_bytes = 16;
-        if type_enum == 0x11 {
-            let fklass = FN_CLASS_FROM_TYPE.unwrap()(ftype);
-            if !fklass.is_null() {
-                 let mut align = 0;
-                 let s = FN_CLASS_VALUE_SIZE.unwrap()(fklass, &mut align) as usize;
-                 if s > 0 && s < 10000 { size_bytes = s; }
-                 else { size_bytes = 256; }
-            } else { size_bytes = 256; }
-        }
-
-        let mut raw_buffer: Vec<u8> = vec![0u8; size_bytes + 32];
-        let raw_ptr = raw_buffer.as_mut_ptr();
-        let align_offset = raw_ptr.align_offset(16);
-
-        if align_offset > 32 {
-            map.insert(fname, Value::String("<Align Error>".to_string()));
-            continue;
-        }
-        let aligned_ptr = raw_ptr.add(align_offset) as *mut c_void;
-
-        FN_FIELD_STATIC_GET_VALUE.unwrap()(field, aligned_ptr);
-
-        let val = match type_enum {
-            // Reference types
-            0xE | 0x12 | 0x1D | 0x15 => {
-                let ptr_val = *(aligned_ptr as *mut usize);
-                if !is_valid_pointer(ptr_val) {
-                    Value::String(format!("<Invalid Pointer: {:#x}>", ptr_val))
-                } else {
-                    let ptr = ptr_val as *mut RawIl2CppObject;
-                    convert_object_to_value(ptr, 0, &mut visited_objects)
-                }
-            },
-            // Value types
-            _ => {
-                read_value_from_addr(aligned_ptr as *mut u8, type_enum, ftype, 0, &mut visited_objects)
-            }
-        };
-
-        map.insert(fname, val);
-    }
-
-    let mut m_iter: *mut c_void = ptr::null_mut();
-    loop {
-        let method = FN_CLASS_GET_METHODS.unwrap()(klass, &mut m_iter);
-        if method.is_null() { break; }
-
-        let mut iflags: u32 = 0;
-        let flags = FN_METHOD_GET_FLAGS.unwrap()(method as *const RawMethodInfo, &mut iflags);
-        if (flags & 0x0010) == 0 { continue; } // METHOD_ATTRIBUTE_STATIC
-
-        let params_count = FN_METHOD_GET_PARAM_COUNT.unwrap()(method);
-        if params_count != 0 { continue; }
-
-        let m_name_ptr = FN_METHOD_GET_NAME.unwrap()(method);
-        let m_name = CStr::from_ptr(m_name_ptr).to_string_lossy().to_string();
-
-        if m_name.starts_with("get_") {
-            let prop_name = &m_name[4..];
-            let backing = format!("<{}>k__BackingField", prop_name);
-            if map.contains_key(&backing) { continue; }
-
-            log!(".. Invoking Static Getter: {}.{}", name, m_name);
-
-            let mut exc: *mut c_void = ptr::null_mut();
-            let res = FN_RUNTIME_INVOKE.unwrap()(
-                method as *const RawMethodInfo,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                &mut exc
-            );
-
-            if exc.is_null() {
-                if res.is_null() {
-                    map.insert(prop_name.to_string(), Value::Null);
-                } else {
-                    let mut p_visited = HashSet::new();
-                    let prop_val = convert_object_to_value(res, depth + 1, &mut p_visited);
-                    map.insert(prop_name.to_string(), prop_val);
-                }
-            } else {
-                map.insert(prop_name.to_string(), Value::String("<Invoke Exception>".to_string()));
-            }
-        }
-    }
-
-    let mut iter: *mut c_void = ptr::null_mut();
-    loop {
-        let nested_class = FN_CLASS_GET_NESTED_TYPES.unwrap()(klass, &mut iter);
-        if nested_class.is_null() { break; }
-        let n_name_ptr = FN_CLASS_GET_NAME.unwrap()(nested_class);
-        let n_name = CStr::from_ptr(n_name_ptr).to_string_lossy().to_string();
-
-        log!(".. Recursing into Static: {}", n_name);
-
-        let nested_val = dump_class_recursive(nested_class, depth + 1);
-        if !nested_val.is_null() {
-            map.insert(n_name, nested_val);
-        }
-    }
-
-    Value::Object(map)
-}
-
 unsafe fn read_value_from_addr(
     addr: *mut u8,
     type_enum: i32,
     ftype: *mut RawIl2CppType,
     depth: usize,
     visited: &mut HashSet<usize>,
+    sensitive_fields: &[String],
 ) -> Value {
     match type_enum {
         0x2 => Value::Bool(*(addr as *const bool)),
@@ -398,11 +233,11 @@ unsafe fn read_value_from_addr(
         0xD => Number::from_f64(*(addr as *const f64)).map(Value::Number).unwrap_or(Value::Null),
         0xE => {
              let ptr = *(addr as *mut *mut RawIl2CppObject);
-             convert_object_to_value(ptr, depth + 1, visited)
+             convert_object_to_value(ptr, depth + 1, visited, sensitive_fields)
         },
         0x12 | 0x1D | 0x15 => {
             let ptr = *(addr as *mut *mut RawIl2CppObject);
-            convert_object_to_value(ptr, depth + 1, visited)
+            convert_object_to_value(ptr, depth + 1, visited, sensitive_fields)
         },
         0x11 => {
             if !ftype.is_null() {
@@ -417,7 +252,7 @@ unsafe fn read_value_from_addr(
                     if FN_CLASS_IS_ENUM.unwrap()(klass) {
                         return resolve_enum_to_string(addr, klass);
                     }
-                    return convert_struct_to_value(addr as *mut c_void, klass, depth + 1, visited);
+                    return convert_struct_to_value(addr as *mut c_void, klass, depth + 1, visited, sensitive_fields);
                 }
             }
             Value::String("UnknownStruct".to_string())
@@ -431,6 +266,7 @@ pub unsafe fn convert_struct_to_value(
     klass: *mut RawIl2CppClass,
     depth: usize,
     visited: &mut HashSet<usize>,
+    sensitive_fields: &[String],
 ) -> Value {
     if depth > MAX_OBJECT_DEPTH { return Value::String("<Max Depth>".to_string()); }
 
@@ -460,7 +296,7 @@ pub unsafe fn convert_struct_to_value(
         let ftype = FN_FIELD_GET_TYPE.unwrap()(field);
         let type_enum = FN_TYPE_GET_TYPE.unwrap()(ftype);
 
-        let val = read_value_from_addr(field_addr, type_enum, ftype, depth, visited);
+        let val = read_value_from_addr(field_addr, type_enum, ftype, depth, visited, sensitive_fields);
         map.insert(name, val);
     }
     Value::Object(map)
@@ -470,6 +306,7 @@ pub unsafe fn convert_object_to_value(
     obj: *mut RawIl2CppObject,
     depth: usize,
     visited: &mut HashSet<usize>,
+    sensitive_fields: &[String],
 ) -> Value {
     if obj.is_null() { return Value::Null; }
 
@@ -539,7 +376,7 @@ pub unsafe fn convert_object_to_value(
                     let elem_ptr_addr = (data_start as *mut *mut RawIl2CppObject).add(i as usize);
                     let elem_ptr = *elem_ptr_addr;
                     if !elem_ptr.is_null() {
-                        vec.push(convert_object_to_value(elem_ptr, depth + 1, visited));
+                        vec.push(convert_object_to_value(elem_ptr, depth + 1, visited, sensitive_fields));
                     } else {
                         vec.push(Value::Null);
                     }
@@ -565,10 +402,10 @@ pub unsafe fn convert_object_to_value(
                                 if let Some(v) = try_decrypt_obscured(elem_ptr as *mut c_void, element_class, &name) {
                                     v
                                 } else {
-                                    convert_struct_to_value(elem_ptr as *mut c_void, element_class, depth + 1, visited)
+                                    convert_struct_to_value(elem_ptr as *mut c_void, element_class, depth + 1, visited, sensitive_fields)
                                 }
                             } else {
-                                convert_struct_to_value(elem_ptr as *mut c_void, element_class, depth + 1, visited)
+                                convert_struct_to_value(elem_ptr as *mut c_void, element_class, depth + 1, visited, sensitive_fields)
                             }
                         };
                         vec.push(val);
@@ -610,14 +447,14 @@ pub unsafe fn convert_object_to_value(
                 .to_string_lossy()
                 .to_string();
 
-            if is_field_blacklisted(&name) { continue; }
+            if is_field_blacklisted(&name, sensitive_fields) { continue; }
 
             let offset = FN_FIELD_GET_OFFSET.unwrap()(field);
             let ftype = FN_FIELD_GET_TYPE.unwrap()(field);
             let type_enum = FN_TYPE_GET_TYPE.unwrap()(ftype);
             let field_addr = (obj as *mut u8).add(offset);
 
-            let val = read_value_from_addr(field_addr, type_enum, ftype, depth, visited);
+            let val = read_value_from_addr(field_addr, type_enum, ftype, depth, visited, sensitive_fields);
             map.insert(name, val);
         }
 

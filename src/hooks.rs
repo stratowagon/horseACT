@@ -1,19 +1,55 @@
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::mem::transmute;
 
 use crate::il2cpp::*;
-use crate::config::{dump_static_variable_define, dump_race_param_define, dump_enums};
-use crate::reflection::{convert_object_to_value, dump_class_recursive};
-use crate::persistence::{save_race_info, save_enums as persist_enums, save_static_data, save_veteran_data, save_team_stadium_result};
+use crate::persistence::{save_race_info, save_team_trial_result};
+use crate::reflection::convert_object_to_value;
 use crate::log;
 
 pub static mut ORIG_GET_RACE_TRACK_ID: usize = 0;
-pub static mut ORIG_VETERAN_APPLY: usize = 0;
-pub static mut ORIG_RACE_PARAM_DEFINE_HOOK: usize = 0;
-pub static mut RACE_PARAM_DEFINE_PTR: usize = 0;
 pub static mut ORIG_TEAM_STADIUM_RESULT: usize = 0;
+
+pub const MAX_API_HOOKS: usize = 8;
+pub static mut API_HOOK_ORIGS: [usize; MAX_API_HOOKS] = [0; MAX_API_HOOKS];
+
+type ApiHookFn = unsafe extern "C" fn(*mut RawIl2CppObject, *mut RawIl2CppObject, *const RawMethodInfo);
+
+macro_rules! api_hook_slot {
+    ($idx:expr, $fn_name:ident) => {
+        unsafe extern "C" fn $fn_name(
+            this: *mut RawIl2CppObject,
+            response: *mut RawIl2CppObject,
+            method: *const RawMethodInfo,
+        ) {
+            let orig = API_HOOK_ORIGS[$idx];
+            if orig != 0 {
+                let orig_fn: ApiHookFn = transmute(orig);
+                orig_fn(this, response, method);
+            }
+            if response.is_null() { return; }
+            let endpoint_config = &crate::api::endpoint_configs()[$idx];
+            let mut visited = HashSet::new();
+            let val = convert_object_to_value(response, 0, &mut visited, &endpoint_config.sensitive_fields);
+            crate::api::dispatch(&endpoint_config.name, val);
+        }
+    };
+}
+
+api_hook_slot!(0, api_hook_slot_0);
+api_hook_slot!(1, api_hook_slot_1);
+api_hook_slot!(2, api_hook_slot_2);
+api_hook_slot!(3, api_hook_slot_3);
+api_hook_slot!(4, api_hook_slot_4);
+api_hook_slot!(5, api_hook_slot_5);
+api_hook_slot!(6, api_hook_slot_6);
+api_hook_slot!(7, api_hook_slot_7);
+
+pub static API_HOOK_FNS: [ApiHookFn; MAX_API_HOOKS] = [
+    api_hook_slot_0, api_hook_slot_1, api_hook_slot_2, api_hook_slot_3,
+    api_hook_slot_4, api_hook_slot_5, api_hook_slot_6, api_hook_slot_7,
+];
 
 static LAST_DUMPED_PTR: AtomicUsize = AtomicUsize::new(0);
 static mut LAST_SIM_DATA_PTR: usize = 0;
@@ -68,21 +104,19 @@ pub unsafe extern "C" fn race_info_hook(
 
                     if name.contains("RaceInfo") {
                         let mut current_sim_ptr = current_sim_ptr;
-                        // resolve offset if not yet found
                         if unsafe { SIM_DATA_OFFSET } == -1 {
                              let mut iter = std::ptr::null_mut();
                              loop {
                                  let field = FN_CLASS_GET_FIELDS.unwrap()(klass, &mut iter);
                                  if field.is_null() { break; }
-                                 
+
                                  let fname_ptr = FN_FIELD_GET_NAME.unwrap()(field);
                                  let fname = CStr::from_ptr(fname_ptr).to_string_lossy();
-                                 
+
                                  if fname == "<SimDataBase64>k__BackingField" {
                                      unsafe { SIM_DATA_OFFSET = FN_FIELD_GET_OFFSET.unwrap()(field) as i32; }
                                      log!("[RaceInfo] Found SimData offset: {}", unsafe { SIM_DATA_OFFSET });
-                                     
-                                     // Re-read sim ptr now that we have offset
+
                                      let val_addr = (current_addr as isize + unsafe { SIM_DATA_OFFSET } as isize) as *const usize;
                                      current_sim_ptr = *val_addr;
                                      break;
@@ -90,7 +124,6 @@ pub unsafe extern "C" fn race_info_hook(
                              }
                         }
 
-                        // Final check before committing to dump
                         if current_sim_ptr != 0 {
                             LAST_DUMPED_PTR.store(current_addr, Ordering::SeqCst);
                             unsafe { LAST_SIM_DATA_PTR = current_sim_ptr; }
@@ -98,66 +131,8 @@ pub unsafe extern "C" fn race_info_hook(
                             log!("[RaceInfo] Dumping valid race data...");
 
                             let mut visited = HashSet::new();
-                            let val = convert_object_to_value(this, 0, &mut visited);
+                            let val = convert_object_to_value(this, 0, &mut visited, &[]);
                             save_race_info(val);
-
-                            if dump_static_variable_define() {
-                                let image = FN_CLASS_GET_IMAGE.unwrap()(klass);
-                                if !image.is_null() {
-                                    let outer_ns = CString::new("Gallop").unwrap();
-                                    let outer_name = CString::new("StaticVariableDefine").unwrap();
-
-                                    let outer_class = FN_CLASS_FROM_NAME.unwrap()(
-                                        image,
-                                        outer_ns.as_ptr(),
-                                        outer_name.as_ptr()
-                                    );
-
-                                    if !outer_class.is_null() {
-                                        log!("[RaceInfo] Dumping full StaticVariableDefine hierarchy...");
-                                        let all_statics = dump_class_recursive(outer_class, 0);
-                                        save_static_data("StaticVariableDefine", all_statics);
-
-                                    } else {
-                                        log!("[Warning] Could not find Gallop.StaticVariableDefine");
-                                    }
-                                }
-                            }
-
-                            if dump_race_param_define() {
-                                if unsafe { RACE_PARAM_DEFINE_PTR } != 0 {
-                                    log!("[RaceParamDefine] Dumping captured instance from race_info_hook");
-                                    let mut p_visited = HashSet::new();
-                                    let ptr = unsafe { RACE_PARAM_DEFINE_PTR as *mut RawIl2CppObject };
-                                    let val = convert_object_to_value(ptr, 0, &mut p_visited);
-                                    save_static_data("RaceParamDefine_Instance", val);
-                                }
-
-                                let image = FN_CLASS_GET_IMAGE.unwrap()(klass);
-                                if !image.is_null() {
-                                    let outer_ns = CString::new("Gallop").unwrap();
-                                    let outer_name = CString::new("RaceParamDefine").unwrap();
-
-                                    let outer_class = FN_CLASS_FROM_NAME.unwrap()(
-                                        image,
-                                        outer_ns.as_ptr(),
-                                        outer_name.as_ptr()
-                                    );
-
-                                    if !outer_class.is_null() {
-                                        log!("[RaceInfo] Dumping full RaceParamDefine hierarchy...");
-                                        let all_statics = dump_class_recursive(outer_class, 0);
-                                        save_static_data("RaceParamDefine", all_statics);
-
-                                    } else {
-                                        log!("[Warning] Could not find Gallop.RaceParamDefine");
-                                    }
-                                }
-                            }
-
-                            if dump_enums() {
-                                persist_enums();
-                            }
 
                             log!("[RaceInfo] Dump Complete.");
                         } else {
@@ -173,7 +148,6 @@ pub unsafe extern "C" fn race_info_hook(
         }
     }
 
-
     if ORIG_GET_RACE_TRACK_ID != 0 {
         let orig: extern "C" fn(*mut RawIl2CppObject, *const RawMethodInfo) -> i32 =
             transmute(ORIG_GET_RACE_TRACK_ID);
@@ -183,101 +157,22 @@ pub unsafe extern "C" fn race_info_hook(
     0
 }
 
-pub unsafe extern "C" fn race_param_define_hook(
+pub unsafe extern "C" fn team_stadium_result_hook(
     this: *mut RawIl2CppObject,
+    response: *mut RawIl2CppObject,
     method: *const RawMethodInfo,
 ) {
-    if ORIG_RACE_PARAM_DEFINE_HOOK != 0 {
-        let orig: extern "C" fn(*mut RawIl2CppObject, *const RawMethodInfo) =
-            transmute(ORIG_RACE_PARAM_DEFINE_HOOK);
-        orig(this, method);
+    if ORIG_TEAM_STADIUM_RESULT != 0 {
+        let orig: ApiHookFn = transmute(ORIG_TEAM_STADIUM_RESULT);
+        orig(this, response, method);
     }
 
-    if dump_race_param_define() && !this.is_null() {
-        let klass = FN_OBJECT_GET_CLASS.unwrap()(this);
-        if !klass.is_null() {
-            let name_ptr = FN_CLASS_GET_NAME.unwrap()(klass);
-            let class_name = CStr::from_ptr(name_ptr).to_string_lossy();
-            
-            if class_name == "RaceParamDefine" {
-                unsafe { RACE_PARAM_DEFINE_PTR = this as usize; }
-                log!("[RaceParamDefine] Caught instantiation!");
-                
-                let ptr_val = this as usize;
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_secs(3));
-                    unsafe {
-                        let domain = FN_DOMAIN_GET.unwrap()();
-                        if !domain.is_null() {
-                            let mut thread = FN_THREAD_CURRENT.unwrap()();
-                            let mut manually_attached = false;
-                            
-                            if thread.is_null() {
-                                thread = FN_THREAD_ATTACH.unwrap()(domain);
-                                manually_attached = true;
-                            }
-                            
-                            if !thread.is_null() {
-                                let mut p_visited = HashSet::new();
-                                let obj = ptr_val as *mut RawIl2CppObject;
-                                let val = convert_object_to_value(obj, 0, &mut p_visited);
-                                crate::persistence::save_static_data("RaceParamDefine_Deferred", val);
-                            }
-                            
-                            if manually_attached {
-                                FN_THREAD_DETACH.unwrap()(thread);
-                            }
-                        }
-                    }
-                });
-            }
-        }
-    }
-}
-
-pub unsafe extern "C" fn veteran_hook(
-    this: *mut RawIl2CppObject,
-    trained_chara_array: *mut RawIl2CppObject,
-) {
-    if ORIG_VETERAN_APPLY != 0 {
-        let orig: extern "C" fn(*mut RawIl2CppObject, *mut RawIl2CppObject) =
-            transmute(ORIG_VETERAN_APPLY);
-        orig(this, trained_chara_array);
-    }
-
-    log!("[Veteran] Hook Triggered");
-
-    if trained_chara_array.is_null() {
-        log!("[Veteran] Error: TrainedChara array parameter is null");
+    if response.is_null() {
+        log!("[TeamTrials] CommonResponse is null; skipping.");
         return;
     }
 
     let mut visited = HashSet::new();
-    let array_data = convert_object_to_value(trained_chara_array, 0, &mut visited);
-
-    if array_data.is_null() {
-        log!("[Veteran] Error: Failed to convert TrainedChara array to JSON");
-        return;
-    }
-
-    save_veteran_data(array_data);
-}
-
-pub unsafe extern "C" fn team_stadium_result_hook(
-    this: *mut RawIl2CppObject,
-    common_response: *mut RawIl2CppObject,
-    method: *const RawMethodInfo,
-) {
-    if ORIG_TEAM_STADIUM_RESULT != 0 {
-        let orig: extern "C" fn(*mut RawIl2CppObject, *mut RawIl2CppObject, *const RawMethodInfo) =
-            transmute(ORIG_TEAM_STADIUM_RESULT);
-        orig(this, common_response, method);
-    }
-
-    if !common_response.is_null() {
-        log!("[TeamTrials] Captured CommonResponse @ {:p}", common_response);
-        let mut visited = HashSet::new();
-        let val = convert_object_to_value(common_response, 0, &mut visited);
-        save_team_stadium_result(val);
-    }
+    let val = convert_object_to_value(response, 0, &mut visited, &[]);
+    save_team_trial_result(val);
 }
