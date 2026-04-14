@@ -14,7 +14,7 @@ use hachimi_plugin_sdk::{
 
 use crate::config::init_paths;
 use crate::il2cpp::{init_il2cpp_methods, RawIl2CppImage, FN_CLASS_FROM_NAME, FN_CLASS_GET_METHOD_FROM_NAME};
-use crate::hooks::{race_info_hook, veteran_hook, race_param_define_hook, ORIG_GET_RACE_TRACK_ID, ORIG_VETERAN_APPLY, ORIG_RACE_PARAM_DEFINE_HOOK};
+use crate::hooks::{race_info_hook, veteran_hook, race_param_define_hook, team_stadium_result_hook, ORIG_GET_RACE_TRACK_ID, ORIG_VETERAN_APPLY, ORIG_RACE_PARAM_DEFINE_HOOK, ORIG_TEAM_STADIUM_RESULT};
 use crate::reflection::find_methods_in_assembly_by_param;
 
 #[hachimi_plugin]
@@ -62,7 +62,7 @@ pub fn main(api: HachimiApi) -> InitResult {
 
             if !method.is_null() {
                 let fn_ptr = *(method as *const usize);
-                if let Some(orig) = interceptor.hook(fn_ptr, race_info_hook as usize) {
+                if let Some(orig) = interceptor.hook(fn_ptr, race_info_hook as *const() as usize) {
                     ORIG_GET_RACE_TRACK_ID = orig;
                     log!("Hooked: Gallop.RaceInfo.get_RaceTrackId");
                 }
@@ -92,7 +92,7 @@ pub fn main(api: HachimiApi) -> InitResult {
 
                 if !method.is_null() {
                     let fn_ptr = *(method as *const usize);
-                    if let Some(orig) = interceptor.hook(fn_ptr, race_param_define_hook as usize) {
+                    if let Some(orig) = interceptor.hook(fn_ptr, race_param_define_hook as *const () as usize) {
                         ORIG_RACE_PARAM_DEFINE_HOOK = orig;
                         log!("Hooked: Gallop.RaceParamDefine.{}", name.to_string_lossy());
                         hooked = true;
@@ -132,7 +132,7 @@ pub fn main(api: HachimiApi) -> InitResult {
 
             let fn_ptr = *(result.method as *const usize);
             if fn_ptr != 0 {
-                if let Some(orig) = interceptor.hook(fn_ptr, veteran_hook as usize) {
+                if let Some(orig) = interceptor.hook(fn_ptr, veteran_hook as *const () as usize) {
                     ORIG_VETERAN_APPLY = orig;
                     log!("Veteran Hook installed on {}.{}", result.class_name, result.method_name);
                 } else {
@@ -140,6 +140,47 @@ pub fn main(api: HachimiApi) -> InitResult {
                 }
             } else {
                 log!("Failed to hook Veteran: method pointer is null");
+            }
+        }
+    }
+
+    unsafe {
+        log!("Scanning for TeamStadiumResult / CommonResponse handler...");
+
+        let results = find_methods_in_assembly_by_param(
+            target_image as *mut RawIl2CppImage,
+            "CommonResponse",
+        );
+
+        if results.is_empty() {
+            log!("WARNING: No methods found taking CommonResponse parameter");
+        } else {
+            log!("Found {} method(s) taking CommonResponse", results.len());
+
+            let best_candidate = results
+                .iter()
+                .find(|r| r.class_name.contains("TeamStadiumResult") && r.method_name == ".ctor")
+                .or_else(|| results.first());
+
+            if let Some(result) = best_candidate {
+                log!("Selected candidate: {}.{}", result.class_name, result.method_name);
+
+                let fn_ptr = *(result.method as *const usize);
+                if fn_ptr != 0 {
+                    if let Some(orig) = interceptor.hook(
+                        fn_ptr,
+                        team_stadium_result_hook as *const () as usize
+                    ) {
+                        ORIG_TEAM_STADIUM_RESULT = orig;
+                        log!("Hooked: {}.{}", result.class_name, result.method_name);
+                    } else {
+                        log!("Failed to hook the selected method");
+                    }
+                } else {
+                    log!("Method pointer is null");
+                }
+            } else {
+                log!("No suitable .ctor found among the candidates");
             }
         }
     }

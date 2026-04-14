@@ -6,13 +6,14 @@ use std::mem::transmute;
 use crate::il2cpp::*;
 use crate::config::{dump_static_variable_define, dump_race_param_define, dump_enums};
 use crate::reflection::{convert_object_to_value, dump_class_recursive};
-use crate::persistence::{save_race_info, save_enums as persist_enums, save_static_data, save_veteran_data};
+use crate::persistence::{save_race_info, save_enums as persist_enums, save_static_data, save_veteran_data, save_team_stadium_result};
 use crate::log;
 
 pub static mut ORIG_GET_RACE_TRACK_ID: usize = 0;
 pub static mut ORIG_VETERAN_APPLY: usize = 0;
 pub static mut ORIG_RACE_PARAM_DEFINE_HOOK: usize = 0;
 pub static mut RACE_PARAM_DEFINE_PTR: usize = 0;
+pub static mut ORIG_TEAM_STADIUM_RESULT: usize = 0;
 
 static LAST_DUMPED_PTR: AtomicUsize = AtomicUsize::new(0);
 static mut LAST_SIM_DATA_PTR: usize = 0;
@@ -260,4 +261,23 @@ pub unsafe extern "C" fn veteran_hook(
     }
 
     save_veteran_data(array_data);
+}
+
+pub unsafe extern "C" fn team_stadium_result_hook(
+    this: *mut RawIl2CppObject,
+    common_response: *mut RawIl2CppObject,
+    method: *const RawMethodInfo,
+) {
+    if ORIG_TEAM_STADIUM_RESULT != 0 {
+        let orig: extern "C" fn(*mut RawIl2CppObject, *mut RawIl2CppObject, *const RawMethodInfo) =
+            transmute(ORIG_TEAM_STADIUM_RESULT);
+        orig(this, common_response, method);
+    }
+
+    if !common_response.is_null() {
+        log!("[TeamTrials] Captured CommonResponse @ {:p}", common_response);
+        let mut visited = HashSet::new();
+        let val = convert_object_to_value(common_response, 0, &mut visited);
+        save_team_stadium_result(val);
+    }
 }

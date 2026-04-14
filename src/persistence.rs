@@ -157,3 +157,41 @@ pub fn save_veteran_data(list_data: Value) {
         }
     }
 }
+
+pub fn save_team_stadium_result(mut response_data: Value) {
+    if let Value::Object(ref mut map) = response_data {
+        map.insert(
+            "horseACT_version".to_string(),
+            Value::String(env!("CARGO_PKG_VERSION").to_string())
+        );
+    }
+
+    let now = chrono::Local::now();
+    let filename = format!("{}.json", now.format("%Y%m%d_%H%M%S_%3f"));
+
+    let dir = crate::config::save_root().join("Team Trials");
+
+    if !dir.exists() {
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            log!("[TeamTrials] Failed to create Team Trials directory: {}", e);
+            return;
+        }
+    }
+
+    let path = dir.join(filename);
+
+    match File::create(&path) {
+        Ok(mut f) => {
+            if let Ok(json_str) = serde_json::to_string_pretty(&response_data) {
+                if let Err(e) = write!(f, "{}", json_str) {
+                    log!("[TeamTrials] Failed to write JSON: {}", e);
+                } else {
+                    log!("[TeamTrials] Saved to: {}", path.display());
+                }
+            }
+        }
+        Err(e) => {
+            log!("[TeamTrials] Failed to create file: {}", e);
+        }
+    }
+}
