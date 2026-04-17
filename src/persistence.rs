@@ -1,11 +1,10 @@
-use std::fs::{self, File};
-use std::io::Write;
-use serde_json::Value;
 use crate::config::{save_career_races, save_root, save_tt_races};
 use crate::log;
+use serde_json::Value;
+use std::fs::{self, File};
+use std::io::Write;
 
 pub fn save_race_info(mut race_info: Value) {
-    
     if let Some(sim_data) = race_info.get("<SimDataBase64>k__BackingField") {
         if sim_data.is_null() {
             log!("[RaceInfo] Skipped saving: <SimDataBase64>k__BackingField is null.");
@@ -15,20 +14,23 @@ pub fn save_race_info(mut race_info: Value) {
 
     if let Value::Object(ref mut map) = race_info {
         map.insert(
-            "horseACT_version".to_string(), 
-            Value::String(env!("CARGO_PKG_VERSION").to_string())
+            "horseACT_version".to_string(),
+            Value::String(env!("CARGO_PKG_VERSION").to_string()),
         );
     }
 
     let now = chrono::Local::now();
     let date_str = now.format("%Y%m%d").to_string();
-    
+
     let mut filename = format!("{}.json", now.format("%Y%m%d_%H%M%S_%3f"));
 
-    if let Some(horses) = race_info.get("<RaceHorse>k__BackingField").and_then(|v| v.as_array()) {
-        let winner_opt = horses.iter().find(|h| {
-            h.get("FinishOrder").and_then(|v| v.as_i64()) == Some(0)
-        });
+    if let Some(horses) = race_info
+        .get("<RaceHorse>k__BackingField")
+        .and_then(|v| v.as_array())
+    {
+        let winner_opt = horses
+            .iter()
+            .find(|h| h.get("FinishOrder").and_then(|v| v.as_i64()) == Some(0));
 
         if let Some(winner) = winner_opt {
             let name = winner
@@ -43,14 +45,23 @@ pub fn save_race_info(mut race_info: Value) {
 
             let safe_name: String = name
                 .chars()
-                .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' { c } else { '_' })
+                .map(|c| {
+                    if c.is_alphanumeric() || c == ' ' || c == '-' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
                 .collect();
 
             filename = format!("{}-{:.4}s-{}.json", safe_name.trim(), raw_time, date_str);
         }
     }
 
-    let folder = match race_info.get("<RaceType>k__BackingField").and_then(|v| v.as_str()) {
+    let folder = match race_info
+        .get("<RaceType>k__BackingField")
+        .and_then(|v| v.as_str())
+    {
         Some("RoomMatch") => "Room match",
         Some("Champions") => "Champions meeting",
         Some("Single") => "Career",
@@ -74,20 +85,18 @@ pub fn save_race_info(mut race_info: Value) {
     let path = dir.join(filename);
 
     match File::create(&path) {
-        Ok(mut f) => {
-            match serde_json::to_string_pretty(&race_info) {
-                Ok(json_str) => {
-                    if let Err(e) = write!(f, "{}", json_str) {
-                        log!("[RaceInfo] Failed to write JSON: {}", e);
-                    } else {
-                        log!("[RaceInfo] Saved to: {}", path.display());
-                    }
-                }
-                Err(e) => {
-                    log!("[RaceInfo] Failed to serialize JSON: {}", e);
+        Ok(mut f) => match serde_json::to_string_pretty(&race_info) {
+            Ok(json_str) => {
+                if let Err(e) = write!(f, "{}", json_str) {
+                    log!("[RaceInfo] Failed to write JSON: {}", e);
+                } else {
+                    log!("[RaceInfo] Saved to: {}", path.display());
                 }
             }
-        }
+            Err(e) => {
+                log!("[RaceInfo] Failed to serialize JSON: {}", e);
+            }
+        },
         Err(e) => {
             log!("[RaceInfo] Failed to create file: {}", e);
         }
@@ -138,3 +147,40 @@ pub fn save_team_trial_result(mut response: Value) {
     }
 }
 
+pub fn save_veteran_data(list_data: Value) {
+    if !list_data.is_array() {
+        log!(
+            "[Veteran] Warning: Data is not an array, got: {:?}",
+            list_data
+        );
+        return;
+    }
+
+    if let Value::Array(ref arr) = list_data {
+        if arr.is_empty() {
+            log!("[Veteran] No veteran characters to save (empty list)");
+            return;
+        }
+        log!("[Veteran] Saving {} veteran character(s)", arr.len());
+    }
+
+    let path = save_root().join("veterans.json");
+
+    match File::create(&path) {
+        Ok(mut f) => match serde_json::to_string_pretty(&list_data) {
+            Ok(json_str) => {
+                if let Err(e) = write!(f, "{}", json_str) {
+                    log!("[Veteran] Failed to write JSON: {}", e);
+                } else {
+                    log!("[Veteran] Saved to: {}", path.display());
+                }
+            }
+            Err(e) => {
+                log!("[Veteran] Failed to serialize JSON: {}", e);
+            }
+        },
+        Err(e) => {
+            log!("[Veteran] Failed to create file: {}", e);
+        }
+    }
+}

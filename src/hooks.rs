@@ -1,20 +1,22 @@
-use std::ffi::CStr;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::ffi::CStr;
 use std::mem::transmute;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::il2cpp::*;
-use crate::persistence::{save_race_info, save_team_trial_result};
-use crate::reflection::convert_object_to_value;
 use crate::log;
+use crate::persistence::{save_race_info, save_team_trial_result, save_veteran_data};
+use crate::reflection::convert_object_to_value;
 
 pub static mut ORIG_GET_RACE_TRACK_ID: usize = 0;
+pub static mut ORIG_VETERAN_APPLY: usize = 0;
 pub static mut ORIG_TEAM_STADIUM_RESULT: usize = 0;
 
 pub const MAX_API_HOOKS: usize = 8;
 pub static mut API_HOOK_ORIGS: [usize; MAX_API_HOOKS] = [0; MAX_API_HOOKS];
 
-type ApiHookFn = unsafe extern "C" fn(*mut RawIl2CppObject, *mut RawIl2CppObject, *const RawMethodInfo);
+type ApiHookFn =
+    unsafe extern "C" fn(*mut RawIl2CppObject, *mut RawIl2CppObject, *const RawMethodInfo);
 
 macro_rules! api_hook_slot {
     ($idx:expr, $fn_name:ident) => {
@@ -28,10 +30,17 @@ macro_rules! api_hook_slot {
                 let orig_fn: ApiHookFn = transmute(orig);
                 orig_fn(this, response, method);
             }
-            if response.is_null() { return; }
+            if response.is_null() {
+                return;
+            }
             let endpoint_config = &crate::api::endpoint_configs()[$idx];
             let mut visited = HashSet::new();
-            let val = convert_object_to_value(response, 0, &mut visited, &endpoint_config.sensitive_fields);
+            let val = convert_object_to_value(
+                response,
+                0,
+                &mut visited,
+                &endpoint_config.sensitive_fields,
+            );
             crate::api::dispatch(&endpoint_config.name, val);
         }
     };
@@ -47,8 +56,14 @@ api_hook_slot!(6, api_hook_slot_6);
 api_hook_slot!(7, api_hook_slot_7);
 
 pub static API_HOOK_FNS: [ApiHookFn; MAX_API_HOOKS] = [
-    api_hook_slot_0, api_hook_slot_1, api_hook_slot_2, api_hook_slot_3,
-    api_hook_slot_4, api_hook_slot_5, api_hook_slot_6, api_hook_slot_7,
+    api_hook_slot_0,
+    api_hook_slot_1,
+    api_hook_slot_2,
+    api_hook_slot_3,
+    api_hook_slot_4,
+    api_hook_slot_5,
+    api_hook_slot_6,
+    api_hook_slot_7,
 ];
 
 static LAST_DUMPED_PTR: AtomicUsize = AtomicUsize::new(0);
@@ -57,16 +72,16 @@ static mut SIM_DATA_OFFSET: i32 = -1;
 
 pub unsafe extern "C" fn race_info_hook(
     this: *mut RawIl2CppObject,
-    method: *const RawMethodInfo
+    method: *const RawMethodInfo,
 ) -> i32 {
-
     let current_addr = this as usize;
     let last_addr = LAST_DUMPED_PTR.load(Ordering::SeqCst);
     let mut current_sim_ptr: usize = 0;
     let mut should_dump = false;
 
     if unsafe { SIM_DATA_OFFSET } != -1 {
-        let val_addr = (current_addr as isize + unsafe { SIM_DATA_OFFSET } as isize) as *const usize;
+        let val_addr =
+            (current_addr as isize + unsafe { SIM_DATA_OFFSET } as isize) as *const usize;
         current_sim_ptr = unsafe { *val_addr };
 
         if current_sim_ptr != 0 {
@@ -84,7 +99,11 @@ pub unsafe extern "C" fn race_info_hook(
     }
 
     if should_dump {
-        log!("[RaceInfo] New Candidate Found ({:p}). SimDataPtr: {:#x}", this, current_sim_ptr);
+        log!(
+            "[RaceInfo] New Candidate Found ({:p}). SimDataPtr: {:#x}",
+            this,
+            current_sim_ptr
+        );
 
         let domain = FN_DOMAIN_GET.unwrap()();
         let mut thread = FN_THREAD_CURRENT.unwrap()();
@@ -105,28 +124,39 @@ pub unsafe extern "C" fn race_info_hook(
                     if name.contains("RaceInfo") {
                         let mut current_sim_ptr = current_sim_ptr;
                         if unsafe { SIM_DATA_OFFSET } == -1 {
-                             let mut iter = std::ptr::null_mut();
-                             loop {
-                                 let field = FN_CLASS_GET_FIELDS.unwrap()(klass, &mut iter);
-                                 if field.is_null() { break; }
+                            let mut iter = std::ptr::null_mut();
+                            loop {
+                                let field = FN_CLASS_GET_FIELDS.unwrap()(klass, &mut iter);
+                                if field.is_null() {
+                                    break;
+                                }
 
-                                 let fname_ptr = FN_FIELD_GET_NAME.unwrap()(field);
-                                 let fname = CStr::from_ptr(fname_ptr).to_string_lossy();
+                                let fname_ptr = FN_FIELD_GET_NAME.unwrap()(field);
+                                let fname = CStr::from_ptr(fname_ptr).to_string_lossy();
 
-                                 if fname == "<SimDataBase64>k__BackingField" {
-                                     unsafe { SIM_DATA_OFFSET = FN_FIELD_GET_OFFSET.unwrap()(field) as i32; }
-                                     log!("[RaceInfo] Found SimData offset: {}", unsafe { SIM_DATA_OFFSET });
+                                if fname == "<SimDataBase64>k__BackingField" {
+                                    unsafe {
+                                        SIM_DATA_OFFSET =
+                                            FN_FIELD_GET_OFFSET.unwrap()(field) as i32;
+                                    }
+                                    log!("[RaceInfo] Found SimData offset: {}", unsafe {
+                                        SIM_DATA_OFFSET
+                                    });
 
-                                     let val_addr = (current_addr as isize + unsafe { SIM_DATA_OFFSET } as isize) as *const usize;
-                                     current_sim_ptr = *val_addr;
-                                     break;
-                                 }
-                             }
+                                    let val_addr = (current_addr as isize
+                                        + unsafe { SIM_DATA_OFFSET } as isize)
+                                        as *const usize;
+                                    current_sim_ptr = *val_addr;
+                                    break;
+                                }
+                            }
                         }
 
                         if current_sim_ptr != 0 {
                             LAST_DUMPED_PTR.store(current_addr, Ordering::SeqCst);
-                            unsafe { LAST_SIM_DATA_PTR = current_sim_ptr; }
+                            unsafe {
+                                LAST_SIM_DATA_PTR = current_sim_ptr;
+                            }
 
                             log!("[RaceInfo] Dumping valid race data...");
 
@@ -175,4 +205,32 @@ pub unsafe extern "C" fn team_stadium_result_hook(
     let mut visited = HashSet::new();
     let val = convert_object_to_value(response, 0, &mut visited, &[]);
     save_team_trial_result(val);
+}
+
+pub unsafe extern "C" fn veteran_hook(
+    this: *mut RawIl2CppObject,
+    trained_chara_array: *mut RawIl2CppObject,
+) {
+    if ORIG_VETERAN_APPLY != 0 {
+        let orig: extern "C" fn(*mut RawIl2CppObject, *mut RawIl2CppObject) =
+            transmute(ORIG_VETERAN_APPLY);
+        orig(this, trained_chara_array);
+    }
+
+    log!("[Veteran] Hook Triggered");
+
+    if trained_chara_array.is_null() {
+        log!("[Veteran] Error: TrainedChara array parameter is null");
+        return;
+    }
+
+    let mut visited = HashSet::new();
+    let array_data = convert_object_to_value(trained_chara_array, 0, &mut visited, &[]);
+
+    if array_data.is_null() {
+        log!("[Veteran] Error: Failed to convert TrainedChara array to JSON");
+        return;
+    }
+
+    save_veteran_data(array_data);
 }
