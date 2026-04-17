@@ -72,7 +72,7 @@ unsafe fn install_hooks() {
         let fn_ptr =
             (vt.il2cpp_get_method_addr)(race_info_class, c"get_RaceTrackId".as_ptr(), 0) as usize;
         if fn_ptr != 0 {
-            if let Some(orig) = hook(fn_ptr, race_info_hook as usize) {
+            if let Some(orig) = hook(fn_ptr, race_info_hook as *const () as usize) {
                 ORIG_GET_RACE_TRACK_ID = orig;
                 log!("Hooked: Gallop.RaceInfo.get_RaceTrackId");
             }
@@ -98,7 +98,7 @@ unsafe fn install_hooks() {
         if let Some(result) = best_candidate {
             let fn_ptr = *(result.method as *const usize);
             if fn_ptr != 0 {
-                if let Some(orig) = hook(fn_ptr, veteran_hook as usize) {
+                if let Some(orig) = hook(fn_ptr, veteran_hook as *const () as usize) {
                     ORIG_VETERAN_APPLY = orig;
                     log!(
                         "Veteran hook installed on {}.{}",
@@ -142,7 +142,7 @@ unsafe fn install_hooks() {
         if let Some(result) = best_candidate {
             let fn_ptr = *(result.method as *const usize);
             if fn_ptr != 0 {
-                if let Some(orig) = hook(fn_ptr, team_stadium_result_hook as usize) {
+                if let Some(orig) = hook(fn_ptr, team_stadium_result_hook as *const () as usize) {
                     ORIG_TEAM_STADIUM_RESULT = orig;
                     log!(
                         "TeamTrials hook installed on {}.{}",

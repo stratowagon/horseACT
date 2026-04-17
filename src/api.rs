@@ -48,6 +48,9 @@ const fn hex_nibble(b: u8) -> u8 {
 
 const fn decode_key(s: &str) -> [u8; 32] {
     let s = s.as_bytes();
+    if s.len() != 64 {
+        panic!("HORSEACT_HMAC_KEY must be exactly 64 hex characters");
+    }
     let mut out = [0u8; 32];
     let mut i = 0;
     while i < 32 {
@@ -57,7 +60,13 @@ const fn decode_key(s: &str) -> [u8; 32] {
     out
 }
 
-const HMAC_KEY: [u8; 32] = decode_key(env!("HORSEACT_HMAC_KEY"));
+const DEFAULT_HMAC_KEY_HEX: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+const HMAC_KEY_HEX: &str = match option_env!("HORSEACT_HMAC_KEY") {
+    Some(key) => key,
+    None => DEFAULT_HMAC_KEY_HEX,
+};
+const HMAC_KEY: [u8; 32] = decode_key(HMAC_KEY_HEX);
 
 pub fn dispatch(endpoint: &str, data: Value) {
     let sv = server_url();
