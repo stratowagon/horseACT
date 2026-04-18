@@ -13,7 +13,10 @@ use crate::hooks::{
     race_info_hook, team_stadium_result_hook, veteran_hook, API_HOOK_FNS, API_HOOK_ORIGS,
     MAX_API_HOOKS, ORIG_GET_RACE_TRACK_ID, ORIG_TEAM_STADIUM_RESULT, ORIG_VETERAN_APPLY,
 };
-use crate::il2cpp::{init_il2cpp_methods, RawIl2CppImage};
+use crate::il2cpp::{
+    find_image_by_name, find_method_addr_by_name, get_class_from_image, init_il2cpp_methods,
+    method_addr, RawIl2CppImage,
+};
 use crate::plugin_api::{hook, store_vtable, vtable, InitResult, Vtable};
 use crate::reflection::find_methods_in_assembly_by_param;
 
@@ -51,14 +54,12 @@ fn init() -> InitResult {
 }
 
 unsafe fn install_hooks() {
-    let vt = vtable();
-
-    let mut target_image = (vt.il2cpp_get_assembly_image)(c"umamusume".as_ptr());
+    let mut target_image = find_image_by_name("umamusume");
     if target_image.is_null() {
-        target_image = (vt.il2cpp_get_assembly_image)(c"Assembly-CSharp".as_ptr());
+        target_image = find_image_by_name("Assembly-CSharp");
     }
     if target_image.is_null() {
-        target_image = (vt.il2cpp_get_assembly_image)(c"Gallop".as_ptr());
+        target_image = find_image_by_name("Gallop");
     }
 
     if target_image.is_null() {
@@ -67,10 +68,9 @@ unsafe fn install_hooks() {
     }
 
     let race_info_class =
-        (vt.il2cpp_get_class)(target_image, c"Gallop".as_ptr(), c"RaceInfo".as_ptr());
+        get_class_from_image(target_image, c"Gallop".as_ptr(), c"RaceInfo".as_ptr());
     if !race_info_class.is_null() {
-        let fn_ptr =
-            (vt.il2cpp_get_method_addr)(race_info_class, c"get_RaceTrackId".as_ptr(), 0) as usize;
+        let fn_ptr = find_method_addr_by_name(race_info_class, c"get_RaceTrackId".as_ptr(), 0);
         if fn_ptr != 0 {
             if let Some(orig) = hook(fn_ptr, race_info_hook as *const () as usize) {
                 ORIG_GET_RACE_TRACK_ID = orig;
@@ -96,7 +96,7 @@ unsafe fn install_hooks() {
             .or_else(|| results.first());
 
         if let Some(result) = best_candidate {
-            let fn_ptr = *(result.method as *const usize);
+            let fn_ptr = method_addr(result.method);
             if fn_ptr != 0 {
                 if let Some(orig) = hook(fn_ptr, veteran_hook as *const () as usize) {
                     ORIG_VETERAN_APPLY = orig;
@@ -140,7 +140,7 @@ unsafe fn install_hooks() {
             .or_else(|| results.first());
 
         if let Some(result) = best_candidate {
-            let fn_ptr = *(result.method as *const usize);
+            let fn_ptr = method_addr(result.method);
             if fn_ptr != 0 {
                 if let Some(orig) = hook(fn_ptr, team_stadium_result_hook as *const () as usize) {
                     ORIG_TEAM_STADIUM_RESULT = orig;
@@ -183,7 +183,7 @@ unsafe fn install_endpoint_hooks(
             .or_else(|| results.first());
 
         if let Some(result) = result {
-            let fn_ptr = *(result.method as *const usize);
+            let fn_ptr = method_addr(result.method);
             if fn_ptr != 0 {
                 if let Some(orig) = hook(fn_ptr, API_HOOK_FNS[slot] as usize) {
                     API_HOOK_ORIGS[slot] = orig;

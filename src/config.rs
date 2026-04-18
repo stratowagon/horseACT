@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::{
     env,
-    ffi::CString,
-    fs::{create_dir_all, read_to_string, File},
+    fs::{create_dir_all, read_to_string, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
+    sync::Mutex,
     sync::OnceLock,
 };
 
@@ -14,6 +14,7 @@ static SERVER_URL: OnceLock<String> = OnceLock::new();
 static FIELD_BLACKLIST: OnceLock<Vec<String>> = OnceLock::new();
 static SAVE_CAREER_RACES: OnceLock<bool> = OnceLock::new();
 static SAVE_TT_RACES: OnceLock<bool> = OnceLock::new();
+static LOG_MUTEX: Mutex<()> = Mutex::new(());
 
 fn default_field_blacklist() -> Vec<String> {
     vec![
@@ -194,9 +195,17 @@ macro_rules! log {
 }
 
 pub fn debug_log_internal(msg: &str) {
-    if let Ok(message) = CString::new(msg) {
-        unsafe {
-            (crate::plugin_api::vtable().log)(3, c"horseACT".as_ptr(), message.as_ptr());
-        }
+    let _guard = LOG_MUTEX.lock().ok();
+
+    let plugin_dir = env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let log_dir = plugin_dir.join("hachimi");
+    let _ = create_dir_all(&log_dir);
+    let log_path = log_dir.join("horseACT.log");
+
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
+        let _ = writeln!(file, "{}", msg);
     }
 }

@@ -1,5 +1,7 @@
 use core::ffi::{c_char, c_void};
+use std::ffi::CStr;
 use std::mem::transmute;
+use std::ptr;
 
 // Type Definitions
 pub type RawIl2CppObject = c_void;
@@ -9,6 +11,7 @@ pub type RawFieldInfo = c_void;
 pub type RawMethodInfo = c_void;
 pub type RawIl2CppType = c_void;
 pub type RawIl2CppImage = c_void;
+pub type RawIl2CppAssembly = c_void;
 pub type RawIl2CppDomain = c_void;
 pub type RawIl2CppThread = c_void;
 
@@ -36,6 +39,10 @@ pub type FnImageGetClass = unsafe extern "C" fn(*mut RawIl2CppImage, usize) -> *
 pub type FnArrayNew = unsafe extern "C" fn(*mut RawIl2CppClass, usize) -> *mut RawIl2CppArray;
 pub type FnClassFromName = unsafe extern "C" fn(*const RawIl2CppImage, *const c_char, *const c_char) -> *mut RawIl2CppClass;
 pub type FnGetCorlib = unsafe extern "C" fn() -> *const RawIl2CppImage;
+pub type FnDomainGetAssemblies =
+    unsafe extern "C" fn(*mut RawIl2CppDomain, *mut usize) -> *mut *const RawIl2CppAssembly;
+pub type FnAssemblyGetImage = unsafe extern "C" fn(*const RawIl2CppAssembly) -> *mut RawIl2CppImage;
+pub type FnImageGetName = unsafe extern "C" fn(*const RawIl2CppImage) -> *const c_char;
 pub type FnFieldGetValueObject = unsafe extern "C" fn(*mut RawFieldInfo, *mut RawIl2CppObject) -> *mut RawIl2CppObject;
 pub type FnDomainGet = unsafe extern "C" fn() -> *mut RawIl2CppDomain;
 pub type FnThreadCurrent = unsafe extern "C" fn() -> *mut RawIl2CppThread;
@@ -54,6 +61,8 @@ pub type FnRuntimeClassInit = unsafe extern "C" fn(*mut RawIl2CppClass);
 pub type FnClassIsGeneric = unsafe extern "C" fn(*mut RawIl2CppClass) -> bool;
 pub type FnRuntimeInvoke = unsafe extern "C" fn(*const RawMethodInfo, *mut c_void, *mut *mut c_void, *mut *mut c_void) -> *mut RawIl2CppObject;
 pub type FnMethodGetFlags = unsafe extern "C" fn(*const RawMethodInfo, *mut u32) -> u32;
+pub type FnClassGetMethodFromName =
+    unsafe extern "C" fn(*mut RawIl2CppClass, *const c_char, i32) -> *mut RawMethodInfo;
 
 // Global Function Pointers
 pub static mut FN_CLASS_GET_FIELDS: Option<FnClassGetFields> = None;
@@ -75,6 +84,9 @@ pub static mut FN_IMAGE_GET_CLASS: Option<FnImageGetClass> = None;
 pub static mut FN_ARRAY_NEW: Option<FnArrayNew> = None;
 pub static mut FN_CLASS_FROM_NAME: Option<FnClassFromName> = None;
 pub static mut FN_GET_CORLIB: Option<FnGetCorlib> = None;
+pub static mut FN_DOMAIN_GET_ASSEMBLIES: Option<FnDomainGetAssemblies> = None;
+pub static mut FN_ASSEMBLY_GET_IMAGE: Option<FnAssemblyGetImage> = None;
+pub static mut FN_IMAGE_GET_NAME: Option<FnImageGetName> = None;
 pub static mut FN_DOMAIN_GET: Option<FnDomainGet> = None;
 pub static mut FN_THREAD_CURRENT: Option<FnThreadCurrent> = None;
 pub static mut FN_THREAD_ATTACH: Option<FnThreadAttach> = None;
@@ -93,6 +105,7 @@ pub static mut FN_CLASS_IS_GENERIC: Option<FnClassIsGeneric> = None;
 pub static mut FN_FIELD_GET_VALUE_OBJECT: Option<FnFieldGetValueObject> = None;
 pub static mut FN_RUNTIME_INVOKE: Option<FnRuntimeInvoke> = None;
 pub static mut FN_METHOD_GET_FLAGS: Option<FnMethodGetFlags> = None;
+pub static mut FN_CLASS_GET_METHOD_FROM_NAME: Option<FnClassGetMethodFromName> = None;
 
 pub unsafe fn init_il2cpp_methods<F>(resolve: F) -> bool
 where
@@ -123,6 +136,9 @@ where
     FN_ARRAY_NEW = resolve_func!(c"il2cpp_array_new");
     FN_CLASS_FROM_NAME = resolve_func!(c"il2cpp_class_from_name");
     FN_GET_CORLIB = resolve_func!(c"il2cpp_get_corlib");
+    FN_DOMAIN_GET_ASSEMBLIES = resolve_func!(c"il2cpp_domain_get_assemblies");
+    FN_ASSEMBLY_GET_IMAGE = resolve_func!(c"il2cpp_assembly_get_image");
+    FN_IMAGE_GET_NAME = resolve_func!(c"il2cpp_image_get_name");
     FN_FIELD_GET_VALUE_OBJECT = resolve_func!(c"il2cpp_field_get_value_object");
 
     FN_DOMAIN_GET = resolve_func!(c"il2cpp_domain_get");
@@ -144,11 +160,15 @@ where
     FN_CLASS_IS_GENERIC = resolve_func!(c"il2cpp_class_is_generic");
     FN_RUNTIME_INVOKE = resolve_func!(c"il2cpp_runtime_invoke");
     FN_METHOD_GET_FLAGS = resolve_func!(c"il2cpp_method_get_flags");
+    FN_CLASS_GET_METHOD_FROM_NAME = resolve_func!(c"il2cpp_class_get_method_from_name");
 
     matches!(FN_CLASS_GET_FIELDS, Some(_))
         && matches!(FN_CLASS_GET_METHODS, Some(_))
         && matches!(FN_IMAGE_GET_CLASS_COUNT, Some(_))
         && matches!(FN_IMAGE_GET_CLASS, Some(_))
+        && matches!(FN_DOMAIN_GET_ASSEMBLIES, Some(_))
+        && matches!(FN_ASSEMBLY_GET_IMAGE, Some(_))
+        && matches!(FN_IMAGE_GET_NAME, Some(_))
         && matches!(FN_FIELD_GET_FLAGS, Some(_))
         && matches!(FN_CLASS_VALUE_SIZE, Some(_))
         && matches!(FN_CLASS_GET_IMAGE, Some(_))
@@ -156,4 +176,79 @@ where
         && matches!(FN_RUNTIME_CLASS_INIT, Some(_))
         && matches!(FN_CLASS_IS_GENERIC, Some(_))
         && matches!(FN_CLASS_IS_INTERFACE, Some(_))
+        && matches!(FN_CLASS_GET_METHOD_FROM_NAME, Some(_))
+}
+
+pub unsafe fn find_image_by_name(name: &str) -> *mut RawIl2CppImage {
+    let domain = FN_DOMAIN_GET.unwrap()();
+    if domain.is_null() {
+        return ptr::null_mut();
+    }
+
+    let mut count = 0usize;
+    let assemblies = FN_DOMAIN_GET_ASSEMBLIES.unwrap()(domain, &mut count);
+    if assemblies.is_null() {
+        return ptr::null_mut();
+    }
+
+    for i in 0..count {
+        let assembly = *assemblies.add(i);
+        if assembly.is_null() {
+            continue;
+        }
+
+        let image = FN_ASSEMBLY_GET_IMAGE.unwrap()(assembly);
+        if image.is_null() {
+            continue;
+        }
+
+        let image_name_ptr = FN_IMAGE_GET_NAME.unwrap()(image);
+        if image_name_ptr.is_null() {
+            continue;
+        }
+
+        let image_name = CStr::from_ptr(image_name_ptr).to_string_lossy();
+        if image_name.eq_ignore_ascii_case(name)
+            || image_name
+                .trim_end_matches(".dll")
+                .eq_ignore_ascii_case(name)
+        {
+            return image;
+        }
+    }
+
+    ptr::null_mut()
+}
+
+pub unsafe fn get_class_from_image(
+    image: *mut RawIl2CppImage,
+    namespace: *const c_char,
+    class_name: *const c_char,
+) -> *mut RawIl2CppClass {
+    if image.is_null() {
+        return ptr::null_mut();
+    }
+
+    FN_CLASS_FROM_NAME.unwrap()(image, namespace, class_name)
+}
+
+pub unsafe fn method_addr(method: *mut RawMethodInfo) -> usize {
+    if method.is_null() {
+        0
+    } else {
+        *(method as *const usize)
+    }
+}
+
+pub unsafe fn find_method_addr_by_name(
+    klass: *mut RawIl2CppClass,
+    method_name: *const c_char,
+    arg_count: i32,
+) -> usize {
+    if klass.is_null() {
+        return 0;
+    }
+
+    let method = FN_CLASS_GET_METHOD_FROM_NAME.unwrap()(klass, method_name, arg_count);
+    method_addr(method)
 }
